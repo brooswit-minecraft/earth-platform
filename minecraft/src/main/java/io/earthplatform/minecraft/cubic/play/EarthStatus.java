@@ -87,12 +87,17 @@ public final class EarthStatus {
     /** Whether the elevation server failed a check, or any data host is down, as when only the climate's is. */
     boolean unreachable() { return unreachable || HostBackoff.anyDown(); }
 
-    /** Asks the elevation server for its smallest tile, off the server thread. */
+    /**
+     * Asks the elevation server for its smallest tile, off the server thread. Uses
+     * {@link CubicSettings#terrariumBase()}, the same configured route {@code tiles(String)} and
+     * {@code riversAndStreams()} read - not the hardcoded AWS URI directly - so an elevation-cache
+     * override is actually probed, rather than this status check quietly reaching AWS regardless.
+     */
     private static CompletableFuture<Boolean> reach() {
         return CompletableFuture.supplyAsync(() -> {
             try {
                 HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build();
-                HttpRequest request = HttpRequest.newBuilder(URI.create(TerrariumTileSource.AWS_TERRAIN_TILES + "0/0/0.png"))
+                HttpRequest request = HttpRequest.newBuilder(CubicSettings.terrariumBase().resolve("0/0/0.png"))
                         .timeout(Duration.ofSeconds(10)).method("HEAD", HttpRequest.BodyPublishers.noBody()).build();
                 return http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode() < 500;
             } catch (Exception failure) {

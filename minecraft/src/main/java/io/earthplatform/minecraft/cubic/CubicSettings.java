@@ -244,7 +244,7 @@ public final class CubicSettings {
      * own {@link TerrariumTileSource} — {@link #tiles(String)} and {@link #riversAndStreams()} alike —
      * reads this, so an override can't be hidden behind one of them still fetching straight from AWS.
      */
-    private static URI terrariumBase() {
+    public static URI terrariumBase() {
         String override = System.getProperty("earthplatform.earth.terrariumBase");
         return override == null || override.isEmpty() ? TerrariumTileSource.AWS_TERRAIN_TILES : URI.create(override);
     }
