@@ -22,6 +22,7 @@ final class CubicSettingsHealthTest {
     void clearOverrides() {
         System.clearProperty("earthplatform.earth.worldCoverBase");
         System.clearProperty("earthplatform.earth.surfaceWaterBase");
+        System.clearProperty("earthplatform.earth.climateBase");
         System.clearProperty("earthplatform.earth.dedicatedHealthProbeMs");
         CubicSettings.resetDedicatedProbesForTesting();
     }
@@ -190,6 +191,70 @@ final class CubicSettingsHealthTest {
             for (int i = 0; i < 50; i++) CubicSettings.worldCoverReachable();
             Thread.sleep(200);
             assertEquals(1, healthRequests.get(), "fifty calls inside one rate-limit window must start exactly one probe");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void climateHealthyWithoutOverrideNeedsNoNetworkCall() {
+        assertTrue(CubicSettings.climateHealthy());
+    }
+
+    @Test
+    void climateHealthyCallsTheConfiguredDedicatedEndpoint() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/__health", exchange -> {
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            System.setProperty("earthplatform.earth.climateBase", "http://127.0.0.1:" + server.getAddress().getPort() + "/");
+            assertTrue(CubicSettings.climateHealthy());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void climateUnhealthyWhenTheDedicatedEndpointAnswers502() throws Exception {
+        // chelsa-cache-proxy's own /__health contract: exactly 200 (healthy) or 502 (not) - confirmed
+        // by reading brooswit-intel/chelsa-cache-proxy's server.py directly.
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/__health", exchange -> {
+            exchange.sendResponseHeaders(502, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            System.setProperty("earthplatform.earth.climateBase", "http://127.0.0.1:" + server.getAddress().getPort() + "/");
+            assertFalse(CubicSettings.climateHealthy());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void climateReachableTransitionsThroughAnOutageAndRecoversAsynchronously() throws Exception {
+        AtomicBoolean healthy = new AtomicBoolean(false);
+        AtomicInteger healthRequests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/__health", exchange -> {
+            healthRequests.incrementAndGet();
+            exchange.sendResponseHeaders(healthy.get() ? 200 : 502, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            System.setProperty("earthplatform.earth.climateBase", "http://127.0.0.1:" + server.getAddress().getPort() + "/");
+            System.setProperty("earthplatform.earth.dedicatedHealthProbeMs", "20");
+
+            awaitTrue(() -> !CubicSettings.climateReachable());
+            healthy.set(true);
+            awaitTrue(CubicSettings::climateReachable);
+
+            assertTrue(healthRequests.get() >= 2);
         } finally {
             server.stop(0);
         }

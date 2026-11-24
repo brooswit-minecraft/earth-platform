@@ -489,10 +489,12 @@ public final class CubicSettings {
             try {
                 // Elevation and rain of their own, the composite alone and the rainfall rows alone: a first visit
                 // then downloads what streams need beside the terrain's own, never queued behind it. Each drained
-                // tile keeps 320 KiB.
+                // tile keeps 320 KiB. Rain reads climateBase() - the same configured climate proxy climate() uses -
+                // but keeps its own separate ClimateSource instance, cache and transfer queue; the two consumers
+                // are never merged into one, per John's 55858 acceptance note.
                 Path tiles = caches.resolve(TerrariumTileSource.DATASET_ID.toLowerCase(Locale.ROOT));
                 TerrariumTileSource elevation = new TerrariumTileSource(TerrariumTileSource.AWS_TERRAIN_TILES, tiles, network, 64, 16, Duration.ofSeconds(20));
-                ClimateSource rain = new ClimateSource(ClimateSource.CHELSA, caches.resolve(ClimateSource.DATASET_ID), network, 32, 8, Duration.ofSeconds(30));
+                ClimateSource rain = new ClimateSource(climateBase(), caches.resolve(ClimateSource.DATASET_ID), network, 32, 8, Duration.ofSeconds(30));
                 riversAndStreams = new RiverMap(surfaceWater(), new Drainage(elevation, rain::precipitation, 24), 256);
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the stream caches under " + caches, failure);
@@ -591,11 +593,13 @@ public final class CubicSettings {
 
     private static final DedicatedProbe worldCoverProbe = new DedicatedProbe();
     private static final DedicatedProbe surfaceWaterProbe = new DedicatedProbe();
+    private static final DedicatedProbe climateProbe = new DedicatedProbe();
 
-    /** Test-only: clears worldCoverReachable()/surfaceWaterReachable()'s cached state and rate limit. */
+    /** Test-only: clears worldCoverReachable()/surfaceWaterReachable()/climateReachable()'s cached state and rate limit. */
     static void resetDedicatedProbesForTesting() {
         worldCoverProbe.resetForTesting();
         surfaceWaterProbe.resetForTesting();
+        climateProbe.resetForTesting();
     }
 
     /** Surface water occurrence, cached on disk beside the elevation tiles. */
@@ -613,6 +617,44 @@ public final class CubicSettings {
         return surfaceWater;
     }
 
+    /**
+     * Where CHELSA climate tiles are fetched from: {@code -Dearthplatform.earth.climateBase}
+     * overrides it (for a local loopback cache such as a chelsa-cache-proxy), defaulting to
+     * {@link ClimateSource#CHELSA} unchanged when unset. Both {@link #climate()} (terrain) and
+     * {@link #riversAndStreams()} (drainage rainfall) read this, each keeping its own separate
+     * ClimateSource instance/cache/transfer queue - an override can't be hidden behind either one
+     * still fetching straight from CHELSA.
+     */
+    public static URI climateBase() {
+        String override = System.getProperty("earthplatform.earth.climateBase");
+        return override == null || override.isEmpty() ? ClimateSource.CHELSA : URI.create(override);
+    }
+
+    /**
+     * Whether the configured climate proxy at {@link #climateBase()} answers its own dedicated,
+     * uncached {@code /__health} endpoint with exactly HTTP 200 - a live reachability probe, kept
+     * deliberately separate from {@link #climate()}/{@link #riversAndStreams()}'s own tile caches
+     * so neither a stale cached success hides a real outage here, nor a bad probe ever evicts or
+     * poisons either cache. When climateBase() is unset (the real CHELSA host, unchanged), there is
+     * no dedicated endpoint to probe, so this reports healthy without a network call - retaining
+     * existing behavior.
+     */
+    public static boolean climateHealthy() {
+        URI base = climateBase();
+        return base.equals(ClimateSource.CHELSA) || dedicatedHealthCheck(base);
+    }
+
+    /**
+     * Cached, rate-limited, asynchronous reachability of the configured climate proxy's dedicated
+     * endpoint: never blocks the calling thread, and re-probes {@link #climateHealthy()} only once
+     * {@code -Dearthplatform.earth.dedicatedHealthProbeMs} (15 s by default) has passed since the
+     * last one finished. True, with no probe scheduled, when climateBase() is unset.
+     */
+    public static boolean climateReachable() {
+        URI base = climateBase();
+        return base.equals(ClimateSource.CHELSA) || climateProbe.reachable(CubicSettings::climateHealthy);
+    }
+
     /** Climate shared by every Earth world in this game, cached on disk beside the elevation tiles. */
     public static synchronized ClimateSource climate() {
         if (climate == null) {
@@ -620,7 +662,7 @@ public final class CubicSettings {
             try {
                 // Rows are about 86 KiB; a 48 km square needs about 210 of them. Its elevation comes in
                 // about 50 small reads, so more of them run at once.
-                climate = new ClimateSource(ClimateSource.CHELSA, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                climate = new ClimateSource(climateBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         320, 8, Duration.ofSeconds(30));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the climate cache at " + cache, failure);

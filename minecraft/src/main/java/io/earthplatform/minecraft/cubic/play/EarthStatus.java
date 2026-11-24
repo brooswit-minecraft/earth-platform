@@ -86,13 +86,14 @@ public final class EarthStatus {
 
     /**
      * Whether the elevation server failed a check, any data host is down, as when only the
-     * climate's is, or a configured land-cover/surface-water proxy's own dedicated health
-     * endpoint reports unhealthy. The last two are cached, rate-limited, asynchronous reads
-     * (CubicSettings.worldCoverReachable()/surfaceWaterReachable()) - never a blocking network
-     * call from this thread.
+     * climate's is, or a configured land-cover/surface-water/climate proxy's own dedicated health
+     * endpoint reports unhealthy. The last three are cached, rate-limited, asynchronous reads
+     * (CubicSettings.worldCoverReachable()/surfaceWaterReachable()/climateReachable()) - never a
+     * blocking network call from this thread.
      */
     boolean unreachable() {
-        return unreachable || HostBackoff.anyDown() || !CubicSettings.worldCoverReachable() || !CubicSettings.surfaceWaterReachable();
+        return unreachable || HostBackoff.anyDown() || !CubicSettings.worldCoverReachable()
+                || !CubicSettings.surfaceWaterReachable() || !CubicSettings.climateReachable();
     }
 
     /** Asks the elevation server for its smallest tile, off the server thread. */
