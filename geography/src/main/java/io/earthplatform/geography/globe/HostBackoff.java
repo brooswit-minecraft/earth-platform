@@ -4,6 +4,7 @@ import io.earthplatform.geography.MissingTerrainException;
 import java.net.URI;
 import java.net.http.HttpResponse;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -24,6 +25,15 @@ public final class HostBackoff {
 
     private static final Map<String, AtomicLong> UNTIL = new ConcurrentHashMap<>();
     private static final Map<String, AtomicLong> LOGGED = new ConcurrentHashMap<>();
+    /**
+     * Authorities (host:port) a caller has told us are a user-configured endpoint rather than the
+     * provider's own well-known one - a wrong or mismatched configured proxy can answer every path with a
+     * stable 404/403, which must not read as "back up" the way it safely can for a stable, well-known host.
+     */
+    private static final Set<String> STRICT = ConcurrentHashMap.newKeySet();
+
+    /** Marks uri's authority as a user-configured endpoint: its recovery probe requires exactly HTTP 200. */
+    public static void strict(URI uri) { STRICT.add(String.valueOf(uri.getAuthority())); }
 
     /**
      * Failed tries in a row, with no answer between them, that mark a host down, and how long they must
@@ -69,7 +79,8 @@ public final class HostBackoff {
                 java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(uri).timeout(CHECK_TIMEOUT)
                         .header("User-Agent", "earth-platform/check").header("Range", "bytes=0-0").GET().build();
                 int status = http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
-                if (status < 500 || slowDown(status)) { answered(uri); return; }
+                boolean healthy = STRICT.contains(String.valueOf(uri.getAuthority())) ? status == 200 : status < 500 || slowDown(status);
+                if (healthy) { answered(uri); return; }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             } catch (java.io.IOException | RuntimeException failure) {
