@@ -45,6 +45,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
 import net.minecraft.core.Registry;
 import net.minecraft.world.level.biome.Biome;
@@ -445,6 +446,17 @@ public final class CubicSettings {
         return base.equals(WorldCoverSource.AWS_WORLDCOVER) || dedicatedHealthCheck(base);
     }
 
+    /**
+     * Cached, rate-limited, asynchronous reachability of the configured land-cover proxy's dedicated
+     * endpoint: never blocks the calling thread, and re-probes {@link #worldCoverHealthy()} only
+     * once {@code -Dearthplatform.earth.dedicatedHealthProbeMs} (15 s by default) has passed since the
+     * last one finished. True, with no probe scheduled, when worldCoverBase() is unset.
+     */
+    public static boolean worldCoverReachable() {
+        URI base = worldCoverBase();
+        return base.equals(WorldCoverSource.AWS_WORLDCOVER) || worldCoverProbe.reachable(CubicSettings::worldCoverHealthy);
+    }
+
     /** Land cover shared by every Earth world in this game, cached on disk beside the elevation tiles. */
     public static synchronized WorldCoverSource cover() {
         if (cover == null) {
@@ -516,6 +528,18 @@ public final class CubicSettings {
     }
 
     /**
+     * Cached, rate-limited, asynchronous reachability of the configured surface-water proxy's
+     * dedicated endpoint: never blocks the calling thread, and re-probes
+     * {@link #surfaceWaterHealthy()} only once {@code -Dearthplatform.earth.dedicatedHealthProbeMs}
+     * (15 s by default) has passed since the last one finished. True, with no probe scheduled, when
+     * surfaceWaterBase() is unset.
+     */
+    public static boolean surfaceWaterReachable() {
+        URI base = surfaceWaterBase();
+        return base.equals(SurfaceWaterSource.JRC_GSW) || surfaceWaterProbe.reachable(CubicSettings::surfaceWaterHealthy);
+    }
+
+    /**
      * A live, uncached GET to base's own {@code __health} endpoint, as {@link #worldCoverHealthy()}
      * and {@link #surfaceWaterHealthy()} share: healthy means exactly HTTP 200, the documented
      * success both proxies' dedicated endpoints report - everything else (a different status, a
@@ -530,6 +554,48 @@ public final class CubicSettings {
         } catch (IOException | InterruptedException failure) {
             return false;
         }
+    }
+
+    /**
+     * Rate-limited, asynchronous wrapper around one source's dedicated health check: at most one
+     * probe in flight at a time, started off the caller's thread no more often than
+     * {@code -Dearthplatform.earth.dedicatedHealthProbeMs} (15 s by default) apart, with every call
+     * in between returning the last known answer (true until the first probe finishes) without
+     * blocking or making a network call itself.
+     */
+    private static final class DedicatedProbe {
+        private volatile boolean reachable = true;
+        private volatile long nextProbe;
+        private volatile boolean probing;
+
+        synchronized boolean reachable(java.util.function.BooleanSupplier check) {
+            long now = System.currentTimeMillis();
+            if (!probing && now >= nextProbe) {
+                probing = true;
+                long intervalMs = Long.getLong("earthplatform.earth.dedicatedHealthProbeMs", 15_000);
+                CompletableFuture.supplyAsync(check::getAsBoolean).whenComplete((result, failure) -> {
+                    reachable = failure == null && result;
+                    nextProbe = System.currentTimeMillis() + intervalMs;
+                    probing = false;
+                });
+            }
+            return reachable;
+        }
+
+        synchronized void resetForTesting() {
+            reachable = true;
+            nextProbe = 0;
+            probing = false;
+        }
+    }
+
+    private static final DedicatedProbe worldCoverProbe = new DedicatedProbe();
+    private static final DedicatedProbe surfaceWaterProbe = new DedicatedProbe();
+
+    /** Test-only: clears worldCoverReachable()/surfaceWaterReachable()'s cached state and rate limit. */
+    static void resetDedicatedProbesForTesting() {
+        worldCoverProbe.resetForTesting();
+        surfaceWaterProbe.resetForTesting();
     }
 
     /** Surface water occurrence, cached on disk beside the elevation tiles. */
