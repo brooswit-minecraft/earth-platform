@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.Reader;
 import java.io.UncheckedIOException;
 import java.io.Writer;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -237,6 +238,18 @@ public final class CubicSettings {
     public static synchronized TerrariumTileSource tiles() { return tiles(elevation()); }
 
     /**
+     * Where Terrarium elevation tiles are fetched from: {@code -Dearthplatform.earth.terrariumBase}
+     * overrides it (for a local loopback cache such as an elevation-cache-proxy), defaulting to
+     * {@link TerrariumTileSource#AWS_TERRAIN_TILES} unchanged when unset. Every caller that builds its
+     * own {@link TerrariumTileSource} — {@link #tiles(String)} and {@link #riversAndStreams()} alike —
+     * reads this, so an override can't be hidden behind one of them still fetching straight from AWS.
+     */
+    private static URI terrariumBase() {
+        String override = System.getProperty("earthplatform.earth.terrariumBase");
+        return override == null || override.isEmpty() ? TerrariumTileSource.AWS_TERRAIN_TILES : URI.create(override);
+    }
+
+    /**
      * Elevation tiles for an {@code earth.elevation} pin, shared by every Earth world in this game made
      * with the same sources, cached on disk under the game folder.
      * {@code -Dearthplatform.earth.offline=true} reads only that cache.
@@ -270,7 +283,7 @@ public final class CubicSettings {
             // that, a first visit cleaned the same tiles five or six times over. Each is 256 KiB: up to a
             // sixteenth of the heap, from 256 to 1,024 of them. Fetching them is mostly a wait on the round
             // trip, so many go at once.
-            known = new TerrariumTileSource(TerrariumTileSource.AWS_TERRAIN_TILES, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+            known = new TerrariumTileSource(terrariumBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                     tilesKept(), transfers(16, 48), Duration.ofSeconds(20), layers);
         } catch (IOException failure) {
             throw new UncheckedIOException("Could not open the elevation tile cache at " + cache, failure);
@@ -450,7 +463,7 @@ public final class CubicSettings {
                 // then downloads what streams need beside the terrain's own, never queued behind it. Each drained
                 // tile keeps 320 KiB.
                 Path tiles = caches.resolve(TerrariumTileSource.DATASET_ID.toLowerCase(Locale.ROOT));
-                TerrariumTileSource elevation = new TerrariumTileSource(TerrariumTileSource.AWS_TERRAIN_TILES, tiles, network, 64, 16, Duration.ofSeconds(20));
+                TerrariumTileSource elevation = new TerrariumTileSource(terrariumBase(), tiles, network, 64, 16, Duration.ofSeconds(20));
                 ClimateSource rain = new ClimateSource(ClimateSource.CHELSA, caches.resolve(ClimateSource.DATASET_ID), network, 32, 8, Duration.ofSeconds(30));
                 riversAndStreams = new RiverMap(surfaceWater(), new Drainage(elevation, rain::precipitation, 24), 256);
             } catch (IOException failure) {
