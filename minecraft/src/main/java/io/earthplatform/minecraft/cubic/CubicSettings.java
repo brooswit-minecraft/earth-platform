@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.Reader;
 import java.io.UncheckedIOException;
 import java.io.Writer;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -416,12 +417,24 @@ public final class CubicSettings {
         return canopy;
     }
 
+    /**
+     * Where ESA WorldCover tiles are fetched from: {@code -Dearthplatform.earth.worldCoverBase}
+     * overrides it (for a local loopback cache such as a worldcover-cache-proxy), defaulting to
+     * {@link WorldCoverSource#AWS_WORLDCOVER} unchanged when unset. {@link #cover()} is this
+     * source's one call site, so an override can't be hidden behind another path still fetching
+     * straight from the bucket.
+     */
+    public static URI worldCoverBase() {
+        String override = System.getProperty("earthplatform.earth.worldCoverBase");
+        return override == null || override.isEmpty() ? WorldCoverSource.AWS_WORLDCOVER : URI.create(override);
+    }
+
     /** Land cover shared by every Earth world in this game, cached on disk beside the elevation tiles. */
     public static synchronized WorldCoverSource cover() {
         if (cover == null) {
             Path cache = cacheFolder().resolve(WorldCoverSource.DATASET_ID);
             try {
-                cover = new WorldCoverSource(WorldCoverSource.AWS_WORLDCOVER, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                cover = new WorldCoverSource(worldCoverBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         48, transfers(8, 24), Duration.ofSeconds(30));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the land cover cache at " + cache, failure);
@@ -460,13 +473,25 @@ public final class CubicSettings {
         return riversAndStreams;
     }
 
+    /**
+     * Where JRC surface water tiles are fetched from: {@code -Dearthplatform.earth.surfaceWaterBase}
+     * overrides it (for a local loopback cache such as a surface-water-cache-proxy), defaulting to
+     * {@link SurfaceWaterSource#JRC_GSW} unchanged when unset. {@link #surfaceWater()} is this
+     * source's one call site, so an override can't be hidden behind another path still fetching
+     * straight from Copernicus.
+     */
+    public static URI surfaceWaterBase() {
+        String override = System.getProperty("earthplatform.earth.surfaceWaterBase");
+        return override == null || override.isEmpty() ? SurfaceWaterSource.JRC_GSW : URI.create(override);
+    }
+
     /** Surface water occurrence, cached on disk beside the elevation tiles. */
     private static synchronized SurfaceWaterSource surfaceWater() {
         if (surfaceWater == null) {
             Path cache = cacheFolder().resolve(SurfaceWaterSource.DATASET_ID);
             try {
                 // Blocks are 64 KiB decoded and cover 7 km.
-                surfaceWater = new SurfaceWaterSource(SurfaceWaterSource.JRC_GSW, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                surfaceWater = new SurfaceWaterSource(surfaceWaterBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         96, 4, Duration.ofSeconds(30));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the surface water cache at " + cache, failure);
