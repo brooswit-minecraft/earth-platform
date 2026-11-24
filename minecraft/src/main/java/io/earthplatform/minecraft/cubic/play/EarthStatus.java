@@ -88,16 +88,21 @@ public final class EarthStatus {
     boolean unreachable() { return unreachable || HostBackoff.anyDown(); }
 
     /**
-     * Asks the elevation server for its smallest tile, off the server thread. Uses
-     * {@link CubicSettings#terrariumBase()}, the same configured route {@code tiles(String)} and
-     * {@code riversAndStreams()} read - not the hardcoded AWS URI directly - so an elevation-cache
-     * override is actually probed, rather than this status check quietly reaching AWS regardless.
+     * Asks the elevation server for its smallest tile, off the server thread. When
+     * {@link CubicSettings#terrariumBase()} is unset (the real AWS endpoint, unchanged), this
+     * still HEADs a tile directly, exactly as before. When it is overridden to a configured
+     * elevation-cache-proxy, this instead hits that proxy's dedicated {@code /__health}
+     * endpoint - a live, uncached reachability check kept deliberately separate from the
+     * proxy's own tile cache, so neither a stale cached tile hides a real outage here, nor a
+     * failed health check ever evicts or poisons the tile cache.
      */
     private static CompletableFuture<Boolean> reach() {
         return CompletableFuture.supplyAsync(() -> {
             try {
                 HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build();
-                HttpRequest request = HttpRequest.newBuilder(CubicSettings.terrariumBase().resolve("0/0/0.png"))
+                URI base = CubicSettings.terrariumBase();
+                URI target = base.equals(TerrariumTileSource.AWS_TERRAIN_TILES) ? base.resolve("0/0/0.png") : base.resolve("__health");
+                HttpRequest request = HttpRequest.newBuilder(target)
                         .timeout(Duration.ofSeconds(10)).method("HEAD", HttpRequest.BodyPublishers.noBody()).build();
                 return http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode() < 500;
             } catch (Exception failure) {
