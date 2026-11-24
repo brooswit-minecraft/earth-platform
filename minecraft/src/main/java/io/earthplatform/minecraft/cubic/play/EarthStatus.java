@@ -90,21 +90,26 @@ public final class EarthStatus {
     /**
      * Asks the elevation server for its smallest tile, off the server thread. When
      * {@link CubicSettings#terrariumBase()} is unset (the real AWS endpoint, unchanged), this
-     * still HEADs a tile directly, exactly as before. When it is overridden to a configured
-     * elevation-cache-proxy, this instead hits that proxy's dedicated {@code /__health}
-     * endpoint - a live, uncached reachability check kept deliberately separate from the
-     * proxy's own tile cache, so neither a stale cached tile hides a real outage here, nor a
-     * failed health check ever evicts or poisons the tile cache.
+     * still HEADs a tile directly, exactly as before - any status under 500 still counts as
+     * reachable there, unchanged. When it is overridden to a configured elevation-cache-proxy,
+     * this instead hits that proxy's dedicated {@code /__health} endpoint, which only ever
+     * answers exactly 200 (healthy) or 502 (upstream down) by contract - so for that configured
+     * path, only an exact 200 counts as reachable; a 404 (wrong/mismatched or outdated proxy
+     * with no {@code /__health} route) or a 403 (access rejected) must not read as healthy just
+     * because it is under 500. The health check itself stays a live, uncached probe kept
+     * deliberately separate from the proxy's own tile cache either way.
      */
     private static CompletableFuture<Boolean> reach() {
         return CompletableFuture.supplyAsync(() -> {
             try {
                 HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build();
                 URI base = CubicSettings.terrariumBase();
-                URI target = base.equals(TerrariumTileSource.AWS_TERRAIN_TILES) ? base.resolve("0/0/0.png") : base.resolve("__health");
+                boolean configuredProxy = !base.equals(TerrariumTileSource.AWS_TERRAIN_TILES);
+                URI target = configuredProxy ? base.resolve("__health") : base.resolve("0/0/0.png");
                 HttpRequest request = HttpRequest.newBuilder(target)
                         .timeout(Duration.ofSeconds(10)).method("HEAD", HttpRequest.BodyPublishers.noBody()).build();
-                return http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode() < 500;
+                int status = http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
+                return configuredProxy ? status == 200 : status < 500;
             } catch (Exception failure) {
                 return false;
             }
