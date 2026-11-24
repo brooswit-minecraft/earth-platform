@@ -79,7 +79,11 @@ public final class HostBackoff {
                 java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(uri).timeout(CHECK_TIMEOUT)
                         .header("User-Agent", "earth-platform/check").header("Range", "bytes=0-0").GET().build();
                 int status = http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
-                boolean healthy = STRICT.contains(String.valueOf(uri.getAuthority())) ? status == 200 : status < 500 || slowDown(status);
+                // This probe always carries Range: bytes=0-0, so a correctly answering host can reply either
+                // 200 (Range ignored) or 206 (honored) - both are a real, successful answer to this exact
+                // request, unlike a 404/403 from a wrong or mismatched configured endpoint.
+                boolean healthy = STRICT.contains(String.valueOf(uri.getAuthority()))
+                        ? status == 200 || status == 206 : status < 500 || slowDown(status);
                 if (healthy) { answered(uri); return; }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
