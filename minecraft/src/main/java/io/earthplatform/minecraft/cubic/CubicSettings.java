@@ -31,6 +31,9 @@ import java.io.Reader;
 import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -429,6 +432,19 @@ public final class CubicSettings {
         return override == null || override.isEmpty() ? WorldCoverSource.AWS_WORLDCOVER : URI.create(override);
     }
 
+    /**
+     * Whether the configured land-cover proxy at {@link #worldCoverBase()} answers its own dedicated,
+     * uncached {@code /__health} endpoint with exactly HTTP 200 - a live reachability probe, kept
+     * deliberately separate from {@link #cover()}'s own tile cache so neither a stale cached success
+     * hides a real outage here, nor a bad probe ever evicts or poisons that cache. When
+     * worldCoverBase() is unset (the real AWS bucket, unchanged), there is no dedicated endpoint to
+     * probe, so this reports healthy without a network call - retaining existing behavior.
+     */
+    public static boolean worldCoverHealthy() {
+        URI base = worldCoverBase();
+        return base.equals(WorldCoverSource.AWS_WORLDCOVER) || dedicatedHealthCheck(base);
+    }
+
     /** Land cover shared by every Earth world in this game, cached on disk beside the elevation tiles. */
     public static synchronized WorldCoverSource cover() {
         if (cover == null) {
@@ -483,6 +499,37 @@ public final class CubicSettings {
     public static URI surfaceWaterBase() {
         String override = System.getProperty("earthplatform.earth.surfaceWaterBase");
         return override == null || override.isEmpty() ? SurfaceWaterSource.JRC_GSW : URI.create(override);
+    }
+
+    /**
+     * Whether the configured surface-water proxy at {@link #surfaceWaterBase()} answers its own
+     * dedicated, uncached {@code /__health} endpoint with exactly HTTP 200 - a live reachability
+     * probe, kept deliberately separate from {@link #surfaceWater()}'s own tile cache so neither a
+     * stale cached success hides a real outage here, nor a bad probe ever evicts or poisons that
+     * cache. When surfaceWaterBase() is unset (the real Copernicus host, unchanged), there is no
+     * dedicated endpoint to probe, so this reports healthy without a network call - retaining
+     * existing behavior.
+     */
+    public static boolean surfaceWaterHealthy() {
+        URI base = surfaceWaterBase();
+        return base.equals(SurfaceWaterSource.JRC_GSW) || dedicatedHealthCheck(base);
+    }
+
+    /**
+     * A live, uncached GET to base's own {@code __health} endpoint, as {@link #worldCoverHealthy()}
+     * and {@link #surfaceWaterHealthy()} share: healthy means exactly HTTP 200, the documented
+     * success both proxies' dedicated endpoints report - everything else (a different status, a
+     * timeout, a connection failure) is unhealthy, never silently treated as reachable.
+     */
+    private static boolean dedicatedHealthCheck(URI base) {
+        try {
+            HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build();
+            HttpRequest request = HttpRequest.newBuilder(base.resolve("__health"))
+                    .timeout(Duration.ofSeconds(10)).GET().build();
+            return http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode() == 200;
+        } catch (IOException | InterruptedException failure) {
+            return false;
+        }
     }
 
     /** Surface water occurrence, cached on disk beside the elevation tiles. */
