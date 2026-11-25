@@ -614,6 +614,18 @@ public final class CubicSettings {
         climateProbe.resetForTesting();
     }
 
+    /**
+     * Test-only: discards the memoized climate()/riversAndStreams()/rivers()/surfaceWater() instances,
+     * so a later call reconstructs with whatever override system properties a test has since set,
+     * rather than reusing a singleton built under an earlier test's configuration.
+     */
+    static void resetSourcesForTesting() {
+        climate = null;
+        rivers = null;
+        riversAndStreams = null;
+        surfaceWater = null;
+    }
+
     /** Surface water occurrence, cached on disk beside the elevation tiles. */
     private static synchronized SurfaceWaterSource surfaceWater() {
         if (surfaceWater == null) {
