@@ -38,6 +38,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Arrays;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -302,11 +303,16 @@ public final class CubicSettings {
      * fjords filled in as land, and heights off the sea's datum north of SRTM. Cached on disk beside
      * the elevation tiles; its blocks are up to 4 MiB decoded.
      */
+    public static URI copernicusBase() {
+        String override = System.getProperty("earthplatform.earth.copernicusBase");
+        return override == null || override.isEmpty() ? CopernicusSource.AWS_COPERNICUS : URI.create(override);
+    }
+
     public static synchronized CopernicusSource copernicus() {
         if (copernicus == null) {
             Path cache = cacheFolder().resolve(CopernicusSource.DATASET_ID);
             try {
-                copernicus = new CopernicusSource(CopernicusSource.AWS_COPERNICUS, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                copernicus = new CopernicusSource(copernicusBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         12, transfers(8, 16), Duration.ofSeconds(30));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the Copernicus elevation cache at " + cache, failure);
@@ -316,12 +322,17 @@ public final class CubicSettings {
     }
 
     /** The United States from 3DEP, cached on disk beside the elevation tiles; both ways of reading it share the cache. */
+    public static URI usgsBase() {
+        String override = System.getProperty("earthplatform.earth.usgsBase");
+        return override == null || override.isEmpty() ? UsgsElevation.AWS_3DEP : URI.create(override);
+    }
+
     public static synchronized UsgsElevation usgs(UsgsElevation.Reading reading) {
         int at = reading.ordinal();
         if (usgs[at] == null) {
             Path cache = cacheFolder().resolve(UsgsElevation.DATASET_ID);
             try {
-                usgs[at] = new UsgsElevation(UsgsElevation.AWS_3DEP, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                usgs[at] = new UsgsElevation(usgsBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         blocksKept(), transfers(6, 24), Duration.ofSeconds(30), reading);
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the 3DEP elevation cache at " + cache, failure);
@@ -351,11 +362,16 @@ public final class CubicSettings {
     static int blocksKept() { return (int) Math.clamp(Runtime.getRuntime().maxMemory() / 32 / (1 << 20), 48, 256); }
 
     /** Antarctica from REMA, cached on disk beside the elevation tiles. */
+    public static URI remaBase() {
+        String override = System.getProperty("earthplatform.earth.remaBase");
+        return override == null || override.isEmpty() ? RemaSource.AWS_REMA : URI.create(override);
+    }
+
     public static synchronized RemaElevation rema() {
         if (rema == null) {
             Path cache = cacheFolder().resolve(RemaSource.DATASET_ID);
             try {
-                rema = new RemaElevation(new RemaSource(RemaSource.AWS_REMA, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                rema = new RemaElevation(new RemaSource(remaBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         blocksKept(), transfers(6, 24), Duration.ofSeconds(30)));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the REMA elevation cache at " + cache, failure);
@@ -365,11 +381,16 @@ public final class CubicSettings {
     }
 
     /** Canada from HRDEM lidar, cached on disk beside the elevation tiles. */
+    public static URI hrdemBase() {
+        String override = System.getProperty("earthplatform.earth.hrdemBase");
+        return override == null || override.isEmpty() ? HrdemElevation.AWS_HRDEM : URI.create(override);
+    }
+
     public static synchronized HrdemElevation hrdem() {
         if (hrdem == null) {
             Path cache = cacheFolder().resolve(HrdemElevation.DATASET_ID);
             try {
-                hrdem = new HrdemElevation(HrdemElevation.AWS_HRDEM, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                hrdem = new HrdemElevation(hrdemBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         blocksKept(), transfers(6, 24), Duration.ofSeconds(30));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the HRDEM elevation cache at " + cache, failure);
@@ -382,11 +403,16 @@ public final class CubicSettings {
      * France from IGN, cached on disk beside the elevation tiles. Its server works each tile out on
      * request, a second or so apiece, so several go at once.
      */
+    public static URI ignBase() {
+        String override = System.getProperty("earthplatform.earth.ignBase");
+        return override == null || override.isEmpty() ? IgnElevation.IGN_WMS : URI.create(override);
+    }
+
     public static synchronized IgnElevation ign() {
         if (ign == null) {
             Path cache = cacheFolder().resolve(IgnElevation.DATASET_ID);
             try {
-                ign = new IgnElevation(IgnElevation.IGN_WMS, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                ign = new IgnElevation(ignBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         64, 12, Duration.ofSeconds(30));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the IGN elevation cache at " + cache, failure);
@@ -396,11 +422,16 @@ public final class CubicSettings {
     }
 
     /** Japan from GSI, cached on disk beside the elevation tiles. Its server is far from most players, so many tiles go at once. */
+    public static URI gsiBase() {
+        String override = System.getProperty("earthplatform.earth.gsiBase");
+        return override == null || override.isEmpty() ? GsiElevation.GSI_TILES : URI.create(override);
+    }
+
     public static synchronized GsiElevation gsi() {
         if (gsi == null) {
             Path cache = cacheFolder().resolve(GsiElevation.DATASET_ID);
             try {
-                gsi = new GsiElevation(GsiElevation.GSI_TILES, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                gsi = new GsiElevation(gsiBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         64, 16, Duration.ofSeconds(30));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the GSI elevation cache at " + cache, failure);
@@ -419,12 +450,17 @@ public final class CubicSettings {
     }
 
     /** Canopy heights shared by every Earth world in this game, cached on disk beside the elevation tiles. */
+    public static URI canopyBase() {
+        String override = System.getProperty("earthplatform.earth.canopyBase");
+        return override == null || override.isEmpty() ? CanopySource.AWS_CANOPY : URI.create(override);
+    }
+
     public static synchronized CanopySource canopy() {
         if (canopy == null) {
             Path cache = cacheFolder().resolve(CanopySource.DATASET_ID);
             try {
                 // Each block is 256 KiB and covers 10 km of trees at the detail they are read at.
-                canopy = new CanopySource(CanopySource.AWS_CANOPY, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                canopy = new CanopySource(canopyBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         24, 4, Duration.ofSeconds(30));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the canopy height cache at " + cache, failure);
@@ -615,15 +651,27 @@ public final class CubicSettings {
     }
 
     /**
-     * Test-only: discards the memoized climate()/riversAndStreams()/rivers()/surfaceWater() instances,
-     * so a later call reconstructs with whatever override system properties a test has since set,
-     * rather than reusing a singleton built under an earlier test's configuration.
+     * Test-only: discards every memoized source singleton (climate/riversAndStreams/rivers/
+     * surfaceWater, cover, the elevation fill/refiner sources, imagery, and the cached elevation
+     * {@code tiles()} pins), so a later call reconstructs with whatever override system properties a
+     * test has since set, rather than reusing a singleton built under an earlier test's configuration.
      */
     static void resetSourcesForTesting() {
         climate = null;
         rivers = null;
         riversAndStreams = null;
         surfaceWater = null;
+        cover = null;
+        copernicus = null;
+        Arrays.fill(usgs, null);
+        rema = null;
+        hrdem = null;
+        ign = null;
+        gsi = null;
+        canopy = null;
+        imagery = null;
+        bareEarth = null;
+        tiles.clear();
     }
 
     /** Surface water occurrence, cached on disk beside the elevation tiles. */
@@ -706,12 +754,17 @@ public final class CubicSettings {
     }
 
     /** Satellite imagery shared by every Earth world in this game, cached on disk beside the elevation tiles. */
+    public static URI eoxBase() {
+        String override = System.getProperty("earthplatform.earth.eoxBase");
+        return override == null || override.isEmpty() ? ImagerySource.EOX_S2_CLOUDLESS_2016 : URI.create(override);
+    }
+
     public static synchronized ImagerySource imagery() {
         if (imagery == null) {
             Path cache = cacheFolder().resolve(ImagerySource.DATASET_ID);
             try {
                 // Tiles are 256 KiB decoded; a 3 km square at full detail needs about 25 of them.
-                imagery = new ImagerySource(ImagerySource.EOX_S2_CLOUDLESS_2016, cache, !Boolean.getBoolean("earthplatform.earth.offline"),
+                imagery = new ImagerySource(eoxBase(), cache, !Boolean.getBoolean("earthplatform.earth.offline"),
                         192, 6, Duration.ofSeconds(30));
             } catch (IOException failure) {
                 throw new UncheckedIOException("Could not open the imagery cache at " + cache, failure);
