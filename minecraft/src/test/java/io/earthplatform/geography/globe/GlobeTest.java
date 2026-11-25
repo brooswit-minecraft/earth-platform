@@ -4,14 +4,20 @@ import com.sun.net.httpserver.HttpServer;
 import io.earthplatform.geography.GeoPoint;
 import io.earthplatform.geography.MissingTerrainException;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 /**
  * Dependency-free harness for the whole-planet surface layer, run by {@link GlobeSuiteTest} in the Gradle tests.
@@ -35,6 +41,7 @@ public final class GlobeTest {
         islandBesideTown();
         kernel();
         streaming();
+        elevationCacheProxy();
         outage();
         worldCover();
         copernicus();
@@ -491,6 +498,137 @@ public final class GlobeTest {
             server.stop(0);
             ((ExecutorService) server.getExecutor()).shutdownNow();
         }
+    }
+
+    /**
+     * Runs the real reader (this class, this decoder) against the real elevation-cache-proxy process
+     * over HTTP, pointed at a local fake provider — not a mock of the proxy. Skipped (not failed) unless
+     * {@code ELEVATION_CACHE_PROXY_PY} names the proxy's {@code proxy.py} on disk, since it lives in its
+     * own repository and needs {@code python3}; set it to opt in locally or once CI has that checkout.
+     */
+    private static void elevationCacheProxy() throws Exception {
+        String proxyScript = System.getenv("ELEVATION_CACHE_PROXY_PY");
+        if (proxyScript == null || proxyScript.isEmpty()) {
+            System.out.println("GlobeTest: elevation-cache-proxy integration skipped (set ELEVATION_CACHE_PROXY_PY to proxy.py's path)");
+            return;
+        }
+        int zoom = 2;
+        Map<String, AtomicInteger> hits = new ConcurrentHashMap<>();
+        // 2/3/0.png (a valid in-range tile at zoom 2, which only spans x,y 0-3) starts as a malformed
+        // "200 OK" response (not a real PNG) until flipped.
+        java.util.concurrent.atomic.AtomicBoolean malformed = new java.util.concurrent.atomic.AtomicBoolean(true);
+        HttpServer fakeProvider = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        fakeProvider.setExecutor(Executors.newFixedThreadPool(4));
+        fakeProvider.createContext("/tiles/", exchange -> {
+            String path = exchange.getRequestURI().getPath().substring("/tiles/".length());
+            hits.computeIfAbsent(path, k -> new AtomicInteger()).incrementAndGet();
+            byte[] body;
+            if (path.equals("2/3/0.png") && malformed.get()) {
+                body = "<Error>not a real tile</Error>".getBytes(StandardCharsets.US_ASCII);
+            } else {
+                String[] parts = path.replace(".png", "").split("/");
+                int z = Integer.parseInt(parts[0]), tx = Integer.parseInt(parts[1]), ty = Integer.parseInt(parts[2]);
+                float[] metres = new float[256 * 256];
+                for (int j = 0; j < 256; j++) for (int i = 0; i < 256; i++) metres[j * 256 + i] = planeAt(z, tx * 256L + i, ty * 256L + j);
+                body = TerrariumTileSource.encode(metres);
+            }
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        fakeProvider.start();
+        String fakeBase = "http://127.0.0.1:" + fakeProvider.getAddress().getPort() + "/tiles/";
+
+        int proxyPort;
+        try (ServerSocket free = new ServerSocket(0)) { proxyPort = free.getLocalPort(); }
+        Path dbFile = Files.createTempFile("elevation-cache-proxy-test", ".sqlite3");
+        Files.deleteIfExists(dbFile);
+        ProcessBuilder launch = new ProcessBuilder("python3", proxyScript);
+        launch.environment().put("ELEVATION_CACHE_UPSTREAM", fakeBase);
+        launch.environment().put("ELEVATION_CACHE_DB", dbFile.toString());
+        launch.environment().put("ELEVATION_CACHE_PORT", String.valueOf(proxyPort));
+        launch.redirectErrorStream(true);
+        Process proxy = launch.start();
+        try {
+            String proxyBase = "http://127.0.0.1:" + proxyPort + "/";
+            waitForProxyReady(proxyBase);
+
+            // The malformed tile must fail through the real proxy, not be silently served. Each attempt's
+            // three internal retries all draw a 502 from the proxy, which is enough failures in a row to
+            // mark this proxy's own authority (127.0.0.1:port) down at the mod's own HostBackoff — the
+            // same thing a real flaky host would do, so the recovery below waits it out the same way
+            // outage() does, not by assuming the very next call succeeds.
+            try (var source = new TerrariumTileSource(URI.create(proxyBase), Files.createTempDirectory("terrarium-proxy-malformed"), true, 4, 2, Duration.ofSeconds(5))) {
+                fail(() -> source.tile(zoom, 3, 0), MissingTerrainException.class, "malformed tile fails through the real proxy");
+            }
+
+            // Flipped valid at the fake provider: a fresh mod-side cache (so this can only have come from
+            // the proxy, which must itself have never kept the malformed bytes) now reads it successfully,
+            // once HostBackoff's own cooldown for this authority has run out and rechecked it.
+            malformed.set(false);
+            if (HostBackoff.anyDown()) {
+                Thread.sleep(HostBackoff.FIRST_DOWN_MS + 200);
+                try (var source = new TerrariumTileSource(URI.create(proxyBase), Files.createTempDirectory("terrarium-proxy-recheck"), true, 4, 2, Duration.ofSeconds(5))) {
+                    fail(() -> source.tile(zoom, 3, 0), MissingTerrainException.class, "the caller that starts the recheck still fails at once");
+                }
+                for (int i = 0; i < 200 && HostBackoff.anyDown(); i++) Thread.sleep(20);
+                check(!HostBackoff.anyDown(), "proxy's authority back up once a recheck got an answer");
+            }
+            try (var source = new TerrariumTileSource(URI.create(proxyBase), Files.createTempDirectory("terrarium-proxy-recovered"), true, 4, 2, Duration.ofSeconds(5))) {
+                float[] recovered = source.tile(zoom, 3, 0);
+                near(planeAt(zoom, 3 * 256 + 5, 0 * 256 + 7), recovered[7 * 256 + 5], 1 / 256.0, "recovered tile decodes correctly through the real proxy");
+            }
+
+            // Cold through the real proxy and real decoder: a fresh mod-side disk cache, so this can only
+            // have come over HTTP from the proxy (cold at the proxy's own SQLite, from the fake provider).
+            float[] cold;
+            try (var source = new TerrariumTileSource(URI.create(proxyBase), Files.createTempDirectory("terrarium-proxy-cold"), true, 4, 2, Duration.ofSeconds(5))) {
+                cold = source.tile(zoom, 1, 2);
+            }
+            near(planeAt(zoom, 256 + 5, 512 + 7), cold[7 * 256 + 5], 1 / 256.0, "cold decoded pixel through the real proxy");
+            long upstreamAfterCold = proxyStat(proxyBase, "upstream_requests");
+            long hitsAfterCold = proxyStat(proxyBase, "cache_hits");
+
+            // Warm: a DIFFERENT fresh mod-side disk cache for the same tile, so a successful decode can only
+            // have come from the proxy's SQLite, not the mod's own cache — and the proxy must add no upstream call.
+            float[] warm;
+            try (var source = new TerrariumTileSource(URI.create(proxyBase), Files.createTempDirectory("terrarium-proxy-warm"), true, 4, 2, Duration.ofSeconds(5))) {
+                warm = source.tile(zoom, 1, 2);
+            }
+            check(java.util.Arrays.equals(cold, warm), "warm read through a fresh mod-side cache still decodes identically");
+            equal(upstreamAfterCold, proxyStat(proxyBase, "upstream_requests"), "warm read added zero upstream requests at the proxy");
+            equal(hitsAfterCold + 1, proxyStat(proxyBase, "cache_hits"), "warm read was one more SQLite cache hit at the proxy");
+            equal(1, hits.get("2/1/2.png").get(), "the fake provider itself was asked for that tile exactly once");
+        } finally {
+            proxy.destroy();
+            proxy.waitFor(5, TimeUnit.SECONDS);
+            fakeProvider.stop(0);
+            ((ExecutorService) fakeProvider.getExecutor()).shutdownNow();
+        }
+    }
+
+    private static void waitForProxyReady(String proxyBase) throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        Exception last = null;
+        for (int attempt = 0; attempt < 50; attempt++) {
+            try {
+                HttpResponse<String> response = client.send(HttpRequest.newBuilder(URI.create(proxyBase + "__stats")).GET().build(), HttpResponse.BodyHandlers.ofString());
+                if (response.statusCode() == 200) return;
+            } catch (Exception failure) {
+                last = failure;
+            }
+            Thread.sleep(100);
+        }
+        throw new IllegalStateException("elevation-cache-proxy never became ready at " + proxyBase, last);
+    }
+
+    /** One counter from the proxy's {@code /__stats} JSON, without a JSON dependency: the response is a flat object of integers. */
+    private static long proxyStat(String proxyBase, String name) throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        HttpResponse<String> response = client.send(HttpRequest.newBuilder(URI.create(proxyBase + "__stats")).GET().build(), HttpResponse.BodyHandlers.ofString());
+        var matcher = Pattern.compile("\"" + name + "\"\\s*:\\s*(\\d+)").matcher(response.body());
+        if (!matcher.find()) throw new IllegalStateException("No \"" + name + "\" in proxy stats: " + response.body());
+        return Long.parseLong(matcher.group(1));
     }
 
     /**
