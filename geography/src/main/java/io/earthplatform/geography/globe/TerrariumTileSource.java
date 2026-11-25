@@ -84,6 +84,10 @@ public final class TerrariumTileSource implements AutoCloseable {
         this.layers = java.util.List.copyOf(layers);
         this.base = Objects.requireNonNull(base);
         if (!base.toString().endsWith("/")) throw new IllegalArgumentException("Tile base URI must end with /");
+        // A configured override (anything but the well-known AWS bucket) can be a wrong or mismatched
+        // endpoint that answers every path with a stable 404/403; HostBackoff must not read that as "back up"
+        // the way it safely can for the stable, well-known default.
+        if (!base.equals(AWS_TERRAIN_TILES)) HostBackoff.strict(base);
         if (maxTilesInMemory < 1 || maxConcurrentTransfers < 1 || timeout.isNegative() || timeout.isZero()) throw new IllegalArgumentException("Invalid tile source budget");
         if (cacheRoot != null) Files.createDirectories(cacheRoot);
         this.cacheRoot = cacheRoot;
