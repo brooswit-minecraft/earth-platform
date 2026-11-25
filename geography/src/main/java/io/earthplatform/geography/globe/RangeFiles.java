@@ -93,11 +93,13 @@ final class RangeFiles implements AutoCloseable {
     /**
      * Whether a 206 response's own Content-Range header - never just its body length, matching
      * length alone still passes a response at the wrong offset - actually covers the requested
-     * bytes=offset-(offset+length-1): same start, and a body exactly as long as the header's own
-     * end-start+1 (which can legitimately be shorter than length at the file's end, but never
-     * mismatched with what Content-Range itself claims). A missing or unparseable header fails
-     * this - a proxy that mislabels a mismatched or truncated reply 206 must not be trusted
-     * just because the status code says success.
+     * bytes=offset-(offset+length-1): same start, a body exactly as long as the header's own
+     * end-start+1, and an end that either reaches the requested end or - when shorter - is proven
+     * to be true end-of-file by a numeric total (end+1 == total). An end short of the requested one
+     * with no numeric total to prove EOF (including an unknown {@code *} total), or an end past the
+     * requested one, is rejected: a proxy that mislabels a mid-file-truncated or oversized reply 206
+     * must not be trusted just because its own start and body length happen to line up (John's
+     * 55882 finding on 42e00802). A missing or unparseable header fails this too.
      */
     private static boolean matchesRequestedRange(HttpResponse<byte[]> response, long offset, int length) {
         String header = response.headers().firstValue("Content-Range").orElse(null);
@@ -107,7 +109,15 @@ final class RangeFiles implements AutoCloseable {
         try {
             long start = Long.parseLong(header.substring(6, dash));
             long end = Long.parseLong(header.substring(dash + 1, slash));
-            return start == offset && response.body().length == end - start + 1;
+            if (start != offset || response.body().length != end - start + 1) return false;
+            long requestedEnd = offset + length - 1;
+            if (end == requestedEnd) return true;
+            if (end > requestedEnd) return false;
+            try {
+                return end + 1 == Long.parseLong(header.substring(slash + 1));
+            } catch (NumberFormatException unknownOrMissingTotal) {
+                return false;
+            }
         } catch (NumberFormatException malformed) {
             return false;
         }
