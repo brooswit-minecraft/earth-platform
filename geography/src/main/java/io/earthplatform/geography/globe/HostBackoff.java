@@ -32,7 +32,10 @@ public final class HostBackoff {
      */
     private static final Set<String> STRICT = ConcurrentHashMap.newKeySet();
 
-    /** Marks uri's authority as a user-configured endpoint: its recovery probe requires exactly HTTP 200. */
+    /**
+     * Marks uri's authority as a user-configured endpoint: its recovery probe requires exactly HTTP 200
+     * or 206 (both are a real, successful answer to the Range: bytes=0-0 request this probe always sends).
+     */
     public static void strict(URI uri) { STRICT.add(String.valueOf(uri.getAuthority())); }
 
     /**

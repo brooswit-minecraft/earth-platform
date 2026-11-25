@@ -64,6 +64,10 @@ public final class SurfaceWaterSource implements AutoCloseable {
     public SurfaceWaterSource(URI base, Path cacheRoot, boolean allowNetwork, int maxBlocksInMemory, int maxConcurrentTransfers, Duration timeout) throws IOException {
         this.base = Objects.requireNonNull(base);
         if (!base.toString().endsWith("/")) throw new IllegalArgumentException("Surface water base URI must end with /");
+        // A configured override (anything but the well-known Copernicus host) can be a wrong or mismatched
+        // endpoint that answers every path with a stable 404/403; HostBackoff must not read that as "back up"
+        // the way it safely can for the stable, well-known default.
+        if (!base.equals(JRC_GSW)) HostBackoff.strict(base);
         if (maxBlocksInMemory < 1 || maxConcurrentTransfers < 1 || timeout.isNegative() || timeout.isZero()) throw new IllegalArgumentException("Invalid surface water source budget");
         if (cacheRoot != null) Files.createDirectories(cacheRoot);
         this.cacheRoot = cacheRoot;

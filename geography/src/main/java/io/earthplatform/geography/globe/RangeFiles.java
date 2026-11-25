@@ -63,15 +63,17 @@ final class RangeFiles implements AutoCloseable {
                 int status = response.statusCode();
                 if (status >= 500 && !HostBackoff.slowDown(status)) HostBackoff.failed(uri, what, "HTTP " + status);
                 else HostBackoff.answered(uri);
-                if (status == 206 || status == 200) {
+                if (status == 206 && !matchesRequestedRange(response, offset, length)) {
+                    last = new IOException("HTTP 206 for " + uri + " with a Content-Range that doesn't match the requested bytes="
+                            + offset + "-" + (offset + length - 1) + " - " + response.headers().firstValue("Content-Range").orElse("(missing)"));
+                } else if (status == 206 || status == 200) {
                     downloads.incrementAndGet();
                     byte[] body = response.body();
                     Downloads.count(what, body.length, System.nanoTime() - start);
                     if (status == 200 && (offset != 0 || body.length > length)) body = Arrays.copyOfRange(body, (int) offset, (int) Math.min(body.length, offset + length));
                     return body;
-                }
-                if (status == 404 || status == 403) return null;
-                last = new IOException("HTTP " + status + " for " + uri);
+                } else if (status == 404 || status == 403) return null;
+                else last = new IOException("HTTP " + status + " for " + uri);
                 if (HostBackoff.slowDown(status) && ++slowed < HostBackoff.ATTEMPTS) {
                     HostBackoff.pause(uri, response, slowed, what);
                     attempt--;
@@ -86,6 +88,39 @@ final class RangeFiles implements AutoCloseable {
             }
         }
         throw new MissingTerrainException(what + " download failed after retries: " + uri + " (" + last + ")");
+    }
+
+    /**
+     * Whether a 206 response's own Content-Range header - never just its body length, matching
+     * length alone still passes a response at the wrong offset - actually covers the requested
+     * bytes=offset-(offset+length-1): same start, a body exactly as long as the header's own
+     * end-start+1, and an end that either reaches the requested end or - when shorter - is proven
+     * to be true end-of-file by a numeric total (end+1 == total). An end short of the requested one
+     * with no numeric total to prove EOF (including an unknown {@code *} total), or an end past the
+     * requested one, is rejected: a proxy that mislabels a mid-file-truncated or oversized reply 206
+     * must not be trusted just because its own start and body length happen to line up (John's
+     * 55882 finding on 42e00802). A missing or unparseable header fails this too.
+     */
+    private static boolean matchesRequestedRange(HttpResponse<byte[]> response, long offset, int length) {
+        String header = response.headers().firstValue("Content-Range").orElse(null);
+        if (header == null || !header.startsWith("bytes ")) return false;
+        int dash = header.indexOf('-', 6), slash = header.indexOf('/', dash + 1);
+        if (dash < 0 || slash < 0) return false;
+        try {
+            long start = Long.parseLong(header.substring(6, dash));
+            long end = Long.parseLong(header.substring(dash + 1, slash));
+            if (start != offset || response.body().length != end - start + 1) return false;
+            long requestedEnd = offset + length - 1;
+            if (end == requestedEnd) return true;
+            if (end > requestedEnd) return false;
+            try {
+                return end + 1 == Long.parseLong(header.substring(slash + 1));
+            } catch (NumberFormatException unknownOrMissingTotal) {
+                return false;
+            }
+        } catch (NumberFormatException malformed) {
+            return false;
+        }
     }
 
     /**

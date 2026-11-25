@@ -47,6 +47,7 @@ public final class GlobeTest {
         copernicus();
         copernicusFill();
         climate();
+        climateCacheProxy();
         imagery();
         palette();
         rema();
@@ -607,6 +608,122 @@ public final class GlobeTest {
         }
     }
 
+    /**
+     * Runs the real {@link ClimateSource} reader against the real chelsa-cache-proxy process, which
+     * talks to the real, CC0-licensed CHELSA upstream (per John's 55922 refinement of the live
+     * evidence in MINECRAFT-575 comments 55920/55921): two independent callers, each its own fresh
+     * disposable mod-side cache directory and its own {@code ClimateSource} instance - per John's
+     * 55858 acceptance note, the terrain and drainage consumers are never merged into one - then a
+     * warm replay through a THIRD fresh directory against the proxy's own retained SQLite cache, and
+     * finally an outage/recovery check through a separate instance pointed at a local loopback
+     * fixture (never the real CHELSA host) so that leg never depends on live network flakiness.
+     * Skipped (not failed) unless {@code CHELSA_CACHE_PROXY_REPO} names the proxy's repository root
+     * on disk, since it lives in its own repository and needs {@code python3}.
+     */
+    private static void climateCacheProxy() throws Exception {
+        String proxyRepo = System.getenv("CHELSA_CACHE_PROXY_REPO");
+        if (proxyRepo == null || proxyRepo.isEmpty()) {
+            System.out.println("GlobeTest: chelsa-cache-proxy integration skipped (set CHELSA_CACHE_PROXY_REPO to its repository root)");
+            return;
+        }
+        double terrainLat = 40.7128, terrainLon = -74.0060; // New York City.
+        // Nairobi: far enough from New York that their rows/chunks never overlap, so a real, nonzero
+        // cold-miss count here can only be drainage's own read, never a warm hit riding on terrain's.
+        double drainageLat = -1.2921, drainageLon = 36.8219;
+
+        Path dbFile = Files.createTempFile("chelsa-cache-proxy-test", ".sqlite3");
+        Files.deleteIfExists(dbFile);
+        int proxyPort;
+        try (ServerSocket free = new ServerSocket(0)) { proxyPort = free.getLocalPort(); }
+        Process proxy = launchChelsaProxy(proxyRepo, proxyPort, dbFile, null);
+        try {
+            String proxyBase = "http://127.0.0.1:" + proxyPort + "/";
+            waitForChelsaProxyReady(proxyBase);
+
+            long coldBefore = chelsaStat(proxyBase, "cold_misses");
+            try (var terrain = new ClimateSource(URI.create(proxyBase), Files.createTempDirectory("chelsa-proxy-terrain"), true, 32, 8, Duration.ofSeconds(30))) {
+                var found = terrain.at(terrainLat, terrainLon, 10);
+                check(found != null, "terrain caller gets real climate data through the real proxy");
+            }
+            long coldAfterTerrain = chelsaStat(proxyBase, "cold_misses");
+            check(coldAfterTerrain > coldBefore, "terrain caller actually reached the real CHELSA upstream through the real proxy");
+
+            // Drainage: a SEPARATE fresh game directory, a SEPARATE ClimateSource instance and a
+            // different place, reading only the rain layer - its own cold-miss footprint must be real
+            // but strictly smaller than terrain's (no koppen/mean/warm/DEM), confirming the two
+            // consumers are never merged.
+            try (var drainage = new ClimateSource(URI.create(proxyBase), Files.createTempDirectory("chelsa-proxy-drainage"), true, 32, 8, Duration.ofSeconds(30))) {
+                double rain = drainage.precipitation(drainageLat, drainageLon);
+                check(!Double.isNaN(rain), "drainage caller gets real rain data through the real proxy");
+            }
+            long coldAfterDrainage = chelsaStat(proxyBase, "cold_misses");
+            long terrainMisses = coldAfterTerrain - coldBefore, drainageMisses = coldAfterDrainage - coldAfterTerrain;
+            check(drainageMisses > 0 && drainageMisses < terrainMisses,
+                    "drainage caller's own cold-miss footprint (" + drainageMisses + ") is real but strictly smaller than terrain's (" + terrainMisses + ")");
+        } finally {
+            proxy.destroy();
+            proxy.waitFor(5, TimeUnit.SECONDS);
+        }
+
+        // Warm replay: the proxy process is killed and a NEW one launched on the SAME sqlite file (so
+        // only its cache, not the process, survives), read through a FOURTH fresh mod-side directory -
+        // a correct read here can only have come from the proxy's retained SQLite cache.
+        int warmPort;
+        try (ServerSocket free = new ServerSocket(0)) { warmPort = free.getLocalPort(); }
+        Process warmProxy = launchChelsaProxy(proxyRepo, warmPort, dbFile, null);
+        try {
+            String warmBase = "http://127.0.0.1:" + warmPort + "/";
+            waitForChelsaProxyReady(warmBase);
+            long warmHitsBefore = chelsaStat(warmBase, "warm_hits"), coldBeforeWarm = chelsaStat(warmBase, "cold_misses");
+            try (var replay = new ClimateSource(URI.create(warmBase), Files.createTempDirectory("chelsa-proxy-warm-replay"), true, 32, 8, Duration.ofSeconds(30))) {
+                double rain = replay.precipitation(drainageLat, drainageLon);
+                check(!Double.isNaN(rain), "warm replay through a fresh mod-side cache still decodes correctly");
+            }
+            check(chelsaStat(warmBase, "warm_hits") > warmHitsBefore, "warm replay was served from the proxy's retained SQLite cache");
+            equal(coldBeforeWarm, chelsaStat(warmBase, "cold_misses"), "warm replay added zero new upstream round trips");
+        } finally {
+            warmProxy.destroy();
+            warmProxy.waitFor(5, TimeUnit.SECONDS);
+        }
+        // The outage/recovery leg against this same proxy binary, through a local loopback fixture
+        // never touching the real CHELSA host, lives in CubicSettingsHealthTest (same package as
+        // CubicSettings, whose resetDedicatedProbesForTesting() is package-private there).
+    }
+
+    private static Process launchChelsaProxy(String proxyRepo, int port, Path dbFile, String upstreamBaseOrNull) throws Exception {
+        ProcessBuilder launch = new ProcessBuilder("python3", "-m", "chelsa_cache_proxy");
+        launch.directory(new java.io.File(proxyRepo));
+        launch.environment().put("PROXY_BIND_PORT", String.valueOf(port));
+        launch.environment().put("PROXY_SQLITE_PATH", dbFile.toString());
+        if (upstreamBaseOrNull != null) launch.environment().put("CHELSA_UPSTREAM_BASE", upstreamBaseOrNull);
+        launch.redirectErrorStream(true);
+        return launch.start();
+    }
+
+    private static void waitForChelsaProxyReady(String proxyBase) throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        Exception last = null;
+        for (int attempt = 0; attempt < 50; attempt++) {
+            try {
+                HttpResponse<String> response = client.send(HttpRequest.newBuilder(URI.create(proxyBase + "_internal/stats")).GET().build(), HttpResponse.BodyHandlers.ofString());
+                if (response.statusCode() == 200) return;
+            } catch (Exception failure) {
+                last = failure;
+            }
+            Thread.sleep(100);
+        }
+        throw new IllegalStateException("chelsa-cache-proxy never became ready at " + proxyBase, last);
+    }
+
+    /** One counter from the proxy's {@code /_internal/stats} JSON, without a JSON dependency: the response is a flat object of integers. */
+    private static long chelsaStat(String proxyBase, String name) throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        HttpResponse<String> response = client.send(HttpRequest.newBuilder(URI.create(proxyBase + "_internal/stats")).GET().build(), HttpResponse.BodyHandlers.ofString());
+        var matcher = Pattern.compile("\"" + name + "\"\\s*:\\s*(\\d+)").matcher(response.body());
+        if (!matcher.find()) throw new IllegalStateException("No \"" + name + "\" in proxy stats: " + response.body());
+        return Long.parseLong(matcher.group(1));
+    }
+
     private static void waitForProxyReady(String proxyBase) throws Exception {
         HttpClient client = HttpClient.newHttpClient();
         Exception last = null;
@@ -894,6 +1011,7 @@ public final class GlobeTest {
             String[] span = range.substring("bytes=".length()).split("-");
             int from = Integer.parseInt(span[0]), to = Math.min(file.length - 1, Integer.parseInt(span[1]));
             byte[] body = Arrays.copyOfRange(file, from, to + 1);
+            exchange.getResponseHeaders().add("Content-Range", "bytes " + from + "-" + to + "/" + file.length);
             exchange.sendResponseHeaders(206, body.length);
             exchange.getResponseBody().write(body);
             exchange.close();
@@ -1028,6 +1146,7 @@ public final class GlobeTest {
             String[] span = range.substring("bytes=".length()).split("-");
             int from = Integer.parseInt(span[0]), to = Math.min(file.length - 1, Integer.parseInt(span[1]));
             byte[] body = Arrays.copyOfRange(file, from, to + 1);
+            exchange.getResponseHeaders().add("Content-Range", "bytes " + from + "-" + to + "/" + file.length);
             exchange.sendResponseHeaders(206, body.length);
             exchange.getResponseBody().write(body);
             exchange.close();
@@ -1343,6 +1462,7 @@ public final class GlobeTest {
                 while (floats.hasRemaining()) floats.putFloat(9806.65f);
                 body = floats.array();
             }
+            exchange.getResponseHeaders().add("Content-Range", "bytes " + from + "-" + (from + body.length - 1) + "/" + (file != null ? String.valueOf(file.length) : "*"));
             exchange.sendResponseHeaders(206, body.length);
             exchange.getResponseBody().write(body);
             exchange.close();
@@ -1542,6 +1662,7 @@ public final class GlobeTest {
             String[] bounds = range.substring("bytes=".length()).split("-");
             int from = Integer.parseInt(bounds[0]), to = Math.min(file.length - 1, Integer.parseInt(bounds[1]));
             byte[] body = Arrays.copyOfRange(file, from, to + 1);
+            exchange.getResponseHeaders().add("Content-Range", "bytes " + from + "-" + to + "/" + file.length);
             exchange.sendResponseHeaders(206, body.length);
             exchange.getResponseBody().write(body);
             exchange.close();
@@ -1661,6 +1782,7 @@ public final class GlobeTest {
             String[] bounds = exchange.getRequestHeaders().getFirst("Range").substring("bytes=".length()).split("-");
             int from = Integer.parseInt(bounds[0]), to = Math.min(file.length - 1, Integer.parseInt(bounds[1]));
             byte[] body = Arrays.copyOfRange(file, from, to + 1);
+            exchange.getResponseHeaders().add("Content-Range", "bytes " + from + "-" + to + "/" + file.length);
             exchange.sendResponseHeaders(206, body.length);
             exchange.getResponseBody().write(body);
             exchange.close();
